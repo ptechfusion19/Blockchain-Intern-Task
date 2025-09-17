@@ -1,0 +1,32 @@
+{
+  "name": "blockchain-intern-task",
+  "version": "1.0.0",
+  "description": "",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node src/create_token.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ptechfusion19/Blockchain-Intern-Task.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/ptechfusion19/Blockchain-Intern-Task/issues"
+  },
+  "homepage": "https://github.com/ptechfusion19/Blockchain-Intern-Task#readme",
+  "dependencies": {
+    "@metaplex-foundation/mpl-token-metadata": "^3.4.0",
+    "@metaplex-foundation/mpl-toolbox": "^0.10.0",
+    "@metaplex-foundation/umi": "^1.4.1",
+    "@metaplex-foundation/umi-bundle-defaults": "^1.4.1",
+    "@metaplex-foundation/umi-uploader-irys": "^1.4.1",
+    "@solana/web3.js": "^1.98.4",
+    "bigint-buffer": "^1.1.5",
+    "bs58": "^6.0.0",
+    "dotenv": "^17.2.2"
+  }
+}
