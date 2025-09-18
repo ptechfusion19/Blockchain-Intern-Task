@@ -18,51 +18,61 @@ import {
   sol,
 } from "@metaplex-foundation/umi";
 
-import {
-  createFungible,
-} from "@metaplex-foundation/mpl-token-metadata";
-
-import {
-  createTokenIfMissing,
-  findAssociatedTokenPda,
-  getSplAssociatedTokenProgramId,
-  mintTokensTo,
-} from "@metaplex-foundation/mpl-toolbox";
-
 import { base58 } from "@metaplex-foundation/umi/serializers";
-import {Keypair} from "@solana/web3.js";
+
 import bs58 from 'bs58';
 
-const payer = process.env.WALLET;
+import { Connection, Keypair} from "@solana/web3.js";
+import {
+  createMint, // convenience wrapper that creates+initializes mint
+  getOrCreateAssociatedTokenAccount,
+  mintTo,
+  TOKEN_2022_PROGRAM_ID,
+  createAccount
+} from "@solana/spl-token";
+
+
+// -------------------- config --------------------
+const payer = process.env.WALLET; // expects base58 secret key (as you used)
+if (!payer) {
+  console.error("ERROR: set WALLET in .env to your base58 secret key");
+  process.exit(1);
+}
 const secretKey = bs58.decode(payer);
 const keypair = Keypair.fromSecretKey(new Uint8Array(secretKey));
-console.log(keypair);
-const RPC = "https://api.devnet.solana.com";
+
+const RPC = process.env.RPC_URL || "https://api.devnet.solana.com";
 const IMAGE_FILE = path.resolve(process.cwd(), "./image.png"); // ensure this exists
+const CLUSTER = "devnet"; // explorer cluster query param
+
+
+
+// -------------------- helper --------------------
+function pubKeyToString(pk) {
+  if (!pk) return String(pk);
+  if (Array.isArray(pk) && pk.length > 0) pk = pk[0];
+  if (typeof pk === "string") return pk;
+  if (pk && typeof pk.toBase58 === "function") return pk.toBase58();
+  if (pk && typeof pk.toString === "function") return pk.toString();
+  return String(pk);
+}
 
 
 async function main() {
   // 1) Umi client with token-metadata, toolbox and irys uploader
   const umi = createUmi(RPC)
-  .use(mplTokenMetadata())
-  .use(mplToolbox())
-  .use(irysUploader());
-  const kp = umi.eddsa.createKeypairFromSecretKey(keypair.secretKey);
-umi.use(keypairIdentity(kp));
+    .use(mplTokenMetadata())
+    .use(mplToolbox())
+    .use(irysUploader());
 
-    // robust helper to stringify public keys / addresses
-  function pubKeyToString(pk) {
-    if (!pk) return String(pk);
-    if (typeof pk === "string") return pk;
-    if (typeof pk.toBase58 === "function") return pk.toBase58();
-    if (typeof pk.toString === "function") return pk.toString();
-    return String(pk);
-  }
+  // 2) Wire UMI identity from the provided local web3 Keypair
+  const kp = umi.eddsa.createKeypairFromSecretKey(keypair.secretKey);
+  umi.use(keypairIdentity(kp));
 
   console.log("Using identity:", pubKeyToString(umi.identity.publicKey));
 
 
-  // 4) Upload image to Arweave via Irys
+  // 3) Upload image to Arweave via Irys
   if (!fs.existsSync(IMAGE_FILE)) {
     throw new Error(`Image file not found at ${IMAGE_FILE} — please add image.png to project root.`);
   }
@@ -76,11 +86,11 @@ umi.use(keypairIdentity(kp));
   const imageUri = Array.isArray(imageUris) ? imageUris[0] : imageUris;
   console.log("Image URI:", imageUri);
 
-  // 5) Create metadata JSON and upload
+  // 4) Create metadata JSON and upload
   const metadata = {
-    name: "Example Token",
-    symbol: "EXMPL",
-    description: "An example token created via Metaplex Umi + Irys uploader",
+    name: "Example Token (Token-2022)",
+    symbol: "EXMPL2022",
+    description: "An example Token-2022 token created via spl-token + Metaplex metadata (Devnet)",
     image: imageUri,
   };
 
@@ -88,56 +98,99 @@ umi.use(keypairIdentity(kp));
   const metadataUri = await umi.uploader.uploadJson(metadata).catch((err) => { throw err; });
   console.log("Metadata URI:", metadataUri);
 
-  // 6) Create mint + token metadata on-chain
-  console.log("Generating mint signer and preparing createFungible instruction...");
-  const mintSigner = generateSigner(umi);
+  //-------------------- TOKEN-2022: create mint, ATA, mint tokens --------------------
+  //We'll use @solana/spl-token helpers but instruct them to use TOKEN_2022_PROGRAM_ID
 
-  const createFungibleIx = createFungible(umi, {
-    mint: mintSigner,
+  const connection = new Connection(RPC, "confirmed");
+
+  console.log("Creating Token-2022 mint (owned by TOKEN_2022_PROGRAM_ID)...");
+
+  // createMint(connection, payer, mintAuthority, freezeAuthority, decimals, keypair?, confirmOptions?, programId?)
+  // We pass the local Keypair (web3 Keypair) as the payer and as mintAuthority.
+
+  const decimals = 9;
+  const mintPubkey = await createMint(
+    connection,
+    keypair,                  // payer (Keypair)
+    keypair.publicKey,        // mintAuthority
+    null,                     // freezeAuthority
+    decimals,                 // decimals
+    undefined,                // keypair (let library create a random mint account keypair)
+    undefined,                // confirm options
+    TOKEN_2022_PROGRAM_ID     // IMPORTANT: create mint owned by Token-2022 program
+  );
+
+  console.log("Token-2022 mint created:", mintPubkey.toBase58());
+
+  // Create (or get) associated token account for our payer using TOKEN_2022_PROGRAM_ID
+  console.log("Creating/getting associated token account (ATA) for the mint (Token-2022 ATA)...");
+  const ata = await createAccount(
+    connection,
+    keypair,             // payer
+    mintPubkey,          // mint
+    keypair.publicKey,   // owner
+    undefined,           // keypair (let library create random account)
+    undefined,           // confirm options
+    TOKEN_2022_PROGRAM_ID // IMPORTANT: derive ATA for Token-2022
+  );
+
+  console.log("Associated Token Account (ATA):", ata.toBase58());
+
+  // Mint tokens to ATA
+  const AMOUNT_TOKENS = 1000n; // human-readable tokens
+  const amountSmallest = AMOUNT_TOKENS * (10n ** BigInt(decimals));
+
+  console.log(`Minting ${AMOUNT_TOKENS} tokens (${amountSmallest} smallest units) to ATA...`);
+  const mintSig = await mintTo(
+    connection,
+    keypair,             // payer
+    mintPubkey,          // mint
+    ata,                 // destination
+    keypair,             // authority (mint authority)
+    amountSmallest,      // amount (BigInt supported)
+    [],                  // multiSigners
+    undefined,           // confirm options
+    TOKEN_2022_PROGRAM_ID // IMPORTANT: mint using Token-2022 program
+  );
+
+  console.log("mintTo tx signature:", mintSig);
+  console.log(`Explorer tx: https://explorer.solana.com/tx/${mintSig}?cluster=${CLUSTER}`);
+
+  // -------------------- Metaplex metadata: create on-chain metadata account pointing to metadataUri --------------------
+  // NOTE: This creates a Metaplex metadata account (Token Metadata program) that points to the off-chain JSON.
+  // It is NOT the "on-mint metadata pointer extension" (that requires special mint initialization with extension space).
+  console.log("Creating on-chain Metaplex Metadata (createV1) pointing to uploaded metadataUri...");
+  // createV1 was provided by mpl-token-metadata library (UMI plugin). Use it with umi.
+  // We rely on umi to sign & send the TX; the mint exists already (Token-2022 mint).
+  const { createV1 } = await import("@metaplex-foundation/mpl-token-metadata");
+  // Note: some packaging environments require calling createV1(umi, {...}). We'll build and send via umi.
+
+  const createMetaIx = createV1(umi, {
+    mint: mintPubkey,
     name: metadata.name,
     uri: metadataUri,
+    symbol: metadata.symbol,
     sellerFeeBasisPoints: percentAmount(0),
-    decimals: 9,
+    updateAuthority: umi.identity.publicKey,
+    // tokenStandard: undefined // optionally set token standard if needed
   });
 
-  // 7) Ensure ATA exists
-  const createTokenIx = createTokenIfMissing(umi, {
-    mint: mintSigner.publicKey,
-    owner: umi.identity.publicKey,
-    ataProgram: getSplAssociatedTokenProgramId(umi),
-  });
+  // send metadata instruction via umi (we need to ensure umi uses our keypair identity)
+  const metaTx = await createMetaIx.sendAndConfirm(umi);
+  const metaSig = base58.deserialize(metaTx.signature)[0];
+  console.log("Metadata create tx sig:", metaSig);
+  console.log(`Metadata tx explorer: https://explorer.solana.com/tx/${metaSig}?cluster=${CLUSTER}`);
 
-  // 8) Mint tokens to ATA (example: 1000 tokens -> amounts in smallest units: amount * 10**decimals)
-  const AMOUNT = 1000n; // tokens
-  const decimals = 9n;
-  const amountSmallest = AMOUNT * (10n ** decimals);
 
-  const mintTokensIx = mintTokensTo(umi, {
-    mint: mintSigner.publicKey,
-    token: findAssociatedTokenPda(umi, {
-      mint: mintSigner.publicKey,
-      owner: umi.identity.publicKey,
-    }),
-    amount: amountSmallest,
-  });
+  // Print results
+  console.log("=== RESULT ===");
+  console.log("Mint address:", mintPubkey.toBase58());
+  console.log("ATA:", ata.address.toBase58());
+  console.log("Mint tx:", `https://explorer.solana.com/tx/${mintSig}?cluster=${CLUSTER}`);
+  console.log("Metadata tx:", `https://explorer.solana.com/tx/${metaSig}?cluster=${CLUSTER}`);
+  console.log("Metadata URI (off-chain JSON):", metadataUri);
 
-  // 9) Chain instructions and send
-  console.log("Chaining instructions and sending transaction...");
-  const tx = await createFungibleIx
-    .add(createTokenIx)
-    .add(mintTokensIx)
-    .sendAndConfirm(umi);
-
-  // 10) Print tx signature and explorer URL
-  const sig = base58.deserialize(tx.signature)[0];
-  console.log("Transaction signature (raw base58):", sig);
-  const explorerUrl = `https://explorer.solana.com/tx/${sig}?cluster=Devnet`;
-  console.log("Explorer URL:", explorerUrl);
-
-  // Also print new mint address and ATA (robust to different publicKey shapes)
-  console.log("Mint address:", pubKeyToString(mintSigner.publicKey));
-  const ata = findAssociatedTokenPda(umi, { mint: mintSigner.publicKey, owner: umi.identity.publicKey });
-  console.log("Associated Token Account (ATA):", pubKeyToString(ata));
+  console.log("Done.");
 
 }
 
